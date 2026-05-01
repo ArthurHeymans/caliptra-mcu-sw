@@ -105,15 +105,21 @@ sequenceDiagram
     Note over HVM,HSM: Device is in Manufacturing lifecycle state
 
     rect rgba(0, 0, 0, 0.05)
-    Note over HVM,Caliptra: Step 1: Retrieve IDevID CSR(s)
-    HVM->>MCU: ExportIdevidCsr (VDM 0x0C)
+    Note over HVM,Caliptra: Step 1a: Retrieve ECC IDevID CSR
+    HVM->>MCU: ExportIdevidCsr (VDM 0x0C, algo=ECC)
     MCU->>Caliptra: Mailbox: GET_IDEV_CSR (ECC)
     Caliptra->>Caliptra: Derive IDevID key pair from UDS
     Caliptra->>Caliptra: Build PKCS#10 CSR with cert attributes from fuses
     Caliptra-->>MCU: Self-signed ECC CSR
+    MCU-->>HVM: ECC CSR bytes
+    end
+
+    rect rgba(0, 0, 0, 0.05)
+    Note over HVM,Caliptra: Step 1b: Retrieve MLDSA IDevID CSR
+    HVM->>MCU: ExportIdevidCsr (VDM 0x0C, algo=MLDSA)
     MCU->>Caliptra: Mailbox: GET_IDEV_CSR (MLDSA)
     Caliptra-->>MCU: Self-signed MLDSA CSR
-    MCU-->>HVM: CSR bytes (ECC + MLDSA)
+    MCU-->>HVM: MLDSA CSR bytes
     end
 
     rect rgba(0, 0, 0, 0.05)
@@ -295,11 +301,12 @@ sequenceDiagram
 
 ### ExportIdevidCsr (0x0C)
 
-Retrieves the IDevID Certificate Signing Request(s) from Caliptra.
+Retrieves the IDevID Certificate Signing Request from Caliptra for a specified algorithm.
 
+- **Input**: Algorithm parameter — ECC or MLDSA
 - **Precondition**: Device must be in **Manufacturing** lifecycle state
-- **Response**: Self-signed PKCS#10 CSR bytes (ECC and/or MLDSA)
-- **Note**: The Caliptra runtime returns individual self-signed CSRs (not the ROM-phase HMAC envelope). The standard PKI flow applies — the pCA verifies the CSR and signs it.
+- **Response**: Self-signed PKCS#10 CSR bytes for the requested algorithm
+- **Note**: Called once per algorithm (ECC and MLDSA separately). The Caliptra runtime returns individual self-signed CSRs (not the ROM-phase HMAC envelope). The standard PKI flow applies — the pCA verifies the CSR and signs it.
 - **Status**: ECC version implemented by Parvathi; MLDSA retrieval TBD (may use a separate mailbox command)
 
 ### SetSlot0Cert (0x0D)
