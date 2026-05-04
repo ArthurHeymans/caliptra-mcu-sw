@@ -57,29 +57,34 @@ Integrators have flexibility in how much of the certificate is stored in OTP fus
 | **MLDSA-87** | Entire cert in fuses | Full DER certificate | Root CA cert only | ~7–8 KB |
 | **MLDSA-87** | Signature only in fuses | Signature | TBS + Root CA cert | 4627 bytes |
 
+### Current Vendor Fuse Availability
+
+The OTP controller has 16 partitions. Partitions 0–8, 10–12, and 15 are allocated to Caliptra core. The following vendor partitions have unallocated space:
+
+| Partition | Name | Available Slots | Total Available | Type |
+|-----------|------|----------------|----------------|------|
+| P9 | `vendor_test_partition` | 1 entry | 56 bytes | Non-secret |
+| P13 | `vendor_secret_prod_partition` (slots 1–15) | 15 entries × 32 bytes | 480 bytes | Secret (scrambled) |
+| P14 | `vendor_non_secret_prod_partition` (slots 5–15) | 11 entries × 32 bytes | 352 bytes | Non-secret |
+| | **Total** | | **888 bytes** | |
+
+Already allocated in vendor partitions: P13 slot 0 (`vendor_recovery_pk_hash`), P14 slots 0–4 (DOT init/state, TRNG config).
+
+**Fit analysis:**
+
+| Data | Size | Fits in current OTP? |
+|------|------|---------------------|
+| ECC signature only | 96 bytes | **Yes** — 3 slots in P14 |
+| ECC full cert | ~547 bytes | **No** — exceeds P14 (352 bytes); P13 has 480 bytes but is secret/scrambled |
+| MLDSA signature | 4,627 bytes | **No** — exceeds all available space (888 bytes total) |
+| MLDSA full cert | ~7–8 KB | **No** |
+
+> **Action needed**: The current OTP partition sizes are insufficient for the ECC full cert and MLDSA signature. The fuse controller partition config (`gen_fuse_ctrl_partitions.yml`) may need to be expanded. Confirm with Chris.
+
 ### Recommended Defaults
 
 - **ECC**: Entire signed certificate in fuses (recommended — the cert is small enough at ~547 bytes)
 - **MLDSA**: Signature only in fuses, TBS template embedded in MCU runtime binary (the full MLDSA cert is ~7–8 KB which is large for fuses; some vendors like Marvell will only allocate fuses for the signature)
-
-### Data Placement Summary
-
-| Data | Storage | Rationale |
-|------|---------|-----------|
-| Root CA certificate | Embedded in MCU runtime binary | Public, same for all devices of a product line. Azure requires the device to provide the full certificate chain. |
-| Intermediate CA certificates | Embedded in MCU runtime binary | If the trust chain has intermediates, they are also embedded in the binary |
-| IDevID certificate TBS | Embedded in MCU runtime binary (MLDSA) or in fuses (ECC) | TBS is mostly templated per product line; device-specific fields are patched at build time |
-| IDevID certificate signature | **OTP fuses** (integrator-defined) | Unique per device, must survive firmware updates and be non-erasable. Provides integrity protection — a tampered TBS in the binary will not match the fused signature, detectable by the remote verifier. |
-
-### Security Rationale for Fuse-Based Signature
-
-Even when the TBS is stored in the MCU runtime binary, the signature stored in fuses provides an integrity guarantee:
-
-- The MCU runtime **does not** verify the certificate signature locally — it simply reconstructs the certificate and provides it to the remote verifier via SPDM.
-- If a malicious runtime modifies the TBS, the reconstructed certificate will have a mismatched signature, and the **remote verifier** will detect the tampering when validating against the trusted Root CA.
-- If the MCU runtime itself is compromised, it could fabricate any certificate regardless of where the signature is stored — but this scenario is addressed by Caliptra's measured boot and runtime integrity attestation.
-
-Integrators may customize the storage model via a trait that controls where each piece is read from and written to.
 
 ---
 
@@ -433,3 +438,46 @@ These fuses are:
 - [Caliptra 2.0 Specification — Fuse Map](https://chipsalliance.github.io/Caliptra/2.0/specification/HEAD/#fuse-map)
 - [IEEE 802.1AR — Secure Device Identity](https://1.ieee802.org/security/802-1ar/)
 - [PKCS#10 — Certificate Signing Request](https://datatracker.ietf.org/doc/html/rfc2986)
+
+---
+
+## Appendix A: Alternative — Signature Hash in Fuses with Per-Device Firmware
+
+If OTP partition sizes cannot be expanded to fit the MLDSA signature (4,627 bytes), an alternative is to store a **hash of the signature** in fuses.
+
+### How It Works
+
+1. During manufacturing, the HSM signs the CSR and produces the MLDSA signature
+2. The provisioning tool computes `SHA-384(signature)` → 48 bytes
+3. The 48-byte hash is written to OTP fuses (fits in 2 slots of P14)
+4. The full MLDSA signature is embedded in the device's firmware image (per-device build)
+5. At boot, the MCU reads the signature from the firmware image, computes `SHA-384(signature)`, and compares against the fused hash
+6. If the hash matches, the MCU reconstructs the certificate (TBS + signature) and provides it to Caliptra
+
+### Fuse Usage
+
+| Data | Size | Partition |
+|------|------|-----------|
+| SHA-384 hash of MLDSA signature | 48 bytes | P14 (2 slots) |
+| ECC full cert (unchanged) | ~547 bytes | Requires expanded partition |
+| ECC signature only (unchanged) | 96 bytes | P14 (3 slots) |
+
+### Trade-offs
+
+| Aspect | Signature in fuses (preferred) | Hash in fuses (alternative) |
+|--------|-------------------------------|----------------------------|
+| Fuse usage (MLDSA) | 4,627 bytes | 48 bytes |
+| Firmware image | Shared across all devices | **Per-device** (unique signature embedded) |
+| Immutability of signature | Physically immutable (OTP) | Software-enforced (hash check in mutable code) |
+| Fleet firmware updates | Single image for all devices | Must carry per-device signature data |
+| Manufacturing complexity | Fuse programming only | Fuse programming + per-device image build |
+
+### Security Considerations
+
+- **Weaker integrity model**: The hash verification runs in the same mutable firmware that contains the signature. A malicious firmware update could simultaneously replace the signature and bypass the hash check. With signature-in-fuses, the signature is physically immutable regardless of firmware state.
+- **Mitigated by verified boot**: Caliptra's measured boot ensures only vendor-signed firmware runs, so unauthorized firmware modifications are blocked at a higher level.
+- **Remote verifier is the ultimate backstop**: In both approaches, the remote verifier validates the certificate chain against the trusted Root CA. A tampered certificate will fail verification regardless of where the signature is stored.
+
+### Recommendation
+
+This approach is a viable fallback if OTP expansion is not feasible, but expanding the fuse controller partitions (preferred) provides stronger security guarantees and avoids the operational complexity of per-device firmware images.
