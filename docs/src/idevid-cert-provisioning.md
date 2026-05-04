@@ -481,3 +481,10 @@ If OTP partition sizes cannot be expanded to fit the MLDSA signature (4,627 byte
 ### Recommendation
 
 This approach is a viable fallback if OTP expansion is not feasible, but expanding the fuse controller partitions (preferred) provides stronger security guarantees and avoids the operational complexity of per-device firmware images.
+
+---
+
+## Appendix B: Alternative — Certificate Data as a Separate "SoC Image"
+
+Instead of embedding certificate data (TBS, signature, Root CA) in the MCU runtime binary, the certificate data could be packaged as a **separate image component**. This follows the same pattern as other vendor SoC images — loaded from flash or streamed via PLDM from a BMC.
+
