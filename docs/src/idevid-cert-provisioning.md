@@ -48,14 +48,19 @@ An X.509 certificate consists of three parts:
 
 ### Fuse Storage Options
 
+![IDevID Certificate Storage Options](images/idevid_storage_options.png)
+
 Integrators have flexibility in how much of the certificate is stored in OTP fuses versus embedded in the MCU runtime binary. The options vary by algorithm due to size constraints:
 
 | Algorithm | Option | Fuse Usage | Binary Usage | Fuse Size |
 |-----------|--------|-----------|-------------|-----------|
 | **ECC P384** | Entire cert in fuses | Full DER certificate | Root CA cert only | ~547 bytes |
 | **ECC P384** | Signature only in fuses | Signature (R ‖ S) | TBS + Root CA cert | 96 bytes |
+| **ECC P384** | Entire cert in binary | None | Full cert + Root CA cert | 0 bytes |
 | **MLDSA-87** | Entire cert in fuses | Full DER certificate | Root CA cert only | ~7–8 KB |
 | **MLDSA-87** | Signature only in fuses | Signature | TBS + Root CA cert | 4627 bytes |
+| **MLDSA-87** | Entire cert in binary | None | Full cert + Root CA cert | 0 bytes |
+
 
 ### Current Vendor Fuse Availability
 
