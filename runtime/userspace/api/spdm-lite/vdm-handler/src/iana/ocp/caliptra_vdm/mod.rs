@@ -48,12 +48,76 @@ pub trait CaliptraVdmCommands {
         out: &mut [u8],
     ) -> CaliptraVdmResult<usize>;
 
+    /// Retrieves device capability bytes into `out`.
+    async fn device_capabilities<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Retrieves device identifier bytes into `out`.
+    async fn device_id<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Retrieves device information for `info_index` into `out`.
+    async fn device_info<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        info_index: u32,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Drains log bytes of `log_type` into `out`.
+    async fn get_log<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        log_type: u32,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<CaliptraVdmLogResult>;
+
+    /// Clears the log identified by `log_type`.
+    async fn clear_log<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        log_type: u32,
+        scratch: &A,
+        io: &I,
+    ) -> CaliptraVdmResult<()>;
+
+    /// Requests a production debug-unlock challenge for `unlock_level` into `out`.
+    async fn request_debug_unlock<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        unlock_level: u8,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Authorizes a production debug-unlock token carried in `token_data`.
+    async fn authorize_debug_unlock_token<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        token_data: &[u8],
+        scratch: &A,
+        io: &I,
+    ) -> CaliptraVdmResult<()>;
+
+    /// Exports an IDevID CSR for `algorithm`, writing CSR bytes into `out`.
+    async fn export_idevid_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        algorithm: u32,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
     /// Exports an attested CSR for `device_key_id` using `algorithm` and `nonce`,
     /// writing the raw CSR bytes into `out` and returning their length.
-    ///
-    /// This is the largest Caliptra VDM response, which is why the backend sets
-    /// `USES_LARGE_RESPONSE`; the lib decides inline vs chunked framing from the
-    /// returned length.
     async fn export_attested_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
         &self,
         device_key_id: u32,
@@ -63,6 +127,31 @@ pub trait CaliptraVdmCommands {
         io: &I,
         out: &mut [u8],
     ) -> CaliptraVdmResult<usize>;
+
+    /// Generates an authorization challenge nonce into `out`.
+    async fn get_auth_challenge<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Verifies `mac` for FE_PROG and programs field entropy for `partition`.
+    async fn program_field_entropy<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        partition: u32,
+        mac: &[u8; 48],
+        scratch: &A,
+        io: &I,
+    ) -> CaliptraVdmResult<()>;
+}
+
+/// Result metadata for log-drain commands.
+pub struct CaliptraVdmLogResult {
+    /// Number of bytes written into the caller-provided log buffer.
+    pub bytes_written: usize,
+    /// Indicates whether more log data remains to be drained.
+    pub more_data: bool,
 }
 
 /// Caliptra VDM backend, parameterized over a platform [`CaliptraVdmCommands`] hook.
@@ -79,8 +168,7 @@ impl<'a, H: CaliptraVdmCommands> CaliptraVdm<'a, H> {
 
 impl<H: CaliptraVdmCommands> SpdmVdmBackend for CaliptraVdm<'_, H> {
     // Caliptra VDM can emit responses (CSRs, logs) larger than one transport
-    // frame. TODO(stack-vdm-large): the large path is stubbed in the stack until
-    // the chunking work in increment 6.
+    // frame, so the stack provisions the buffered large-response path.
     const USES_LARGE_RESPONSE: bool = true;
 
     fn match_id(&self, registry: &VdmRegistry<'_>) -> bool {
@@ -136,6 +224,52 @@ impl<H: CaliptraVdmCommands> SpdmVdmBackend for CaliptraVdm<'_, H> {
             Ok(CaliptraVdmCommand::FirmwareVersion) => {
                 commands::firmware_version::handle(self.cmds, cmd_req, alloc, io, payload).await
             }
+            Ok(CaliptraVdmCommand::DeviceCapabilities) => {
+                commands::device_capabilities::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::DeviceId) => {
+                commands::device_id::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::DeviceInfo) => {
+                commands::device_info::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::GetDebugLog) => {
+                commands::get_debug_log::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::ClearDebugLog) => {
+                commands::clear_debug_log::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::GetAttestationLog) => {
+                commands::get_attestation_log::handle(self.cmds, cmd_req, alloc, io, payload).await
+            }
+            Ok(CaliptraVdmCommand::ClearAttestationLog) => {
+                commands::clear_attestation_log::handle(self.cmds, cmd_req, alloc, io, payload)
+                    .await
+            }
+            Ok(CaliptraVdmCommand::RequestDebugUnlock) => {
+                commands::debug_unlock::handle_request_debug_unlock(
+                    self.cmds, cmd_req, alloc, io, payload,
+                )
+                .await
+            }
+            Ok(CaliptraVdmCommand::AuthorizeDebugUnlockToken) => {
+                commands::debug_unlock::handle_authorize_debug_unlock_token(
+                    self.cmds, cmd_req, alloc, io, payload,
+                )
+                .await
+            }
+            Ok(CaliptraVdmCommand::ExportIdevidCsr) => {
+                commands::export_idevid_csr::handle(
+                    self.cmds,
+                    cmd_req,
+                    command_code,
+                    payload,
+                    large,
+                    alloc,
+                    io,
+                )
+                .await
+            }
             Ok(CaliptraVdmCommand::ExportAttestedCsr) => {
                 commands::export_attested_csr::handle(
                     self.cmds,
@@ -147,6 +281,9 @@ impl<H: CaliptraVdmCommands> SpdmVdmBackend for CaliptraVdm<'_, H> {
                     io,
                 )
                 .await
+            }
+            Ok(CaliptraVdmCommand::AuthorizedCommand) => {
+                commands::authorized_command::handle(self.cmds, cmd_req, alloc, io, payload).await
             }
             // Recognized-but-unimplemented and unknown command codes both map to
             // an UnsupportedOperation completion.

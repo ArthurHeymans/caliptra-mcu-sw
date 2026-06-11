@@ -31,8 +31,9 @@ pub enum CaliptraVdmCommand {
     SetSlot0Cert = 0x0D,
     GetSlot0State = 0x0E,
     ExportAttestedCsr = 0x0F,
-    ProgramFieldEntropy = 0x10,
     DeviceOwnershipTransfer = 0x11,
+    /// Single entry point for authorization-related sub-commands.
+    AuthorizedCommand = 0x12,
 }
 
 impl TryFrom<u8> for CaliptraVdmCommand {
@@ -55,8 +56,8 @@ impl TryFrom<u8> for CaliptraVdmCommand {
             0x0D => Self::SetSlot0Cert,
             0x0E => Self::GetSlot0State,
             0x0F => Self::ExportAttestedCsr,
-            0x10 => Self::ProgramFieldEntropy,
             0x11 => Self::DeviceOwnershipTransfer,
+            0x12 => Self::AuthorizedCommand,
             _ => return Err(()),
         })
     }
