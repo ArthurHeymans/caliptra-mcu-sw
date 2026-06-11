@@ -235,8 +235,8 @@ impl CaliptraVdmCommands for CaliptraVdmHook {
     async fn export_idevid_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
         &self,
         algorithm: u32,
-        scratch: &A,
-        io: &I,
+        _scratch: &A,
+        _io: &I,
         out: &mut [u8],
     ) -> CaliptraVdmResult<usize> {
         let algo =
@@ -244,9 +244,13 @@ impl CaliptraVdmCommands for CaliptraVdmHook {
         let mut cert_ctx = CertContext::new();
         match algo {
             AsymAlgo::EccP384 => {
-                let mut csr_der = scratch
-                    .alloc(io, [0u8; IDEV_ECC_CSR_MAX_SIZE])
-                    .map_err(|_| CaliptraCompletionCode::InsufficientResources)?;
+                // The Caliptra mailbox API requires a full VarSizeDataResp-sized
+                // IDevID CSR response buffer (~9 KiB), even though the CSR returned
+                // by the emulator fixtures is much smaller. Do not reserve that from
+                // the SPDM request scratch pool: the pool is intentionally sized for
+                // SPDM-lite's steady-state work, while the VDM large-response buffer
+                // already stages the bytes returned to the host.
+                let mut csr_der = [0u8; IDEV_ECC_CSR_MAX_SIZE];
                 let len = cert_ctx
                     .get_idev_csr(&mut csr_der)
                     .await
