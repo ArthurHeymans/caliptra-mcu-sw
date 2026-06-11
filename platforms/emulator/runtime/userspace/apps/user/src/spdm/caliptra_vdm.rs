@@ -20,7 +20,9 @@ use caliptra_mcu_libapi_caliptra::crypto::import::{CmKeyUsage, Import};
 use caliptra_mcu_libapi_caliptra::crypto::rng::Rng;
 use caliptra_mcu_libapi_caliptra::error::CaliptraApiError;
 use caliptra_mcu_libapi_caliptra::mailbox_api::execute_mailbox_cmd;
-use caliptra_mcu_libsyscall_caliptra::mailbox::Mailbox;
+use caliptra_mcu_libsyscall_caliptra::mailbox::{Mailbox, MailboxError};
+use caliptra_mcu_libsyscall_caliptra::DefaultSyscalls;
+use caliptra_mcu_libtock_platform::ErrorCode;
 use constant_time_eq::constant_time_eq;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -210,27 +212,23 @@ impl CaliptraVdmCommands for CaliptraVdmHook {
     async fn authorize_debug_unlock_token<A: SpdmPalAlloc, I: SpdmPalIo>(
         &self,
         token_data: &[u8],
-        scratch: &A,
-        io: &I,
+        _scratch: &A,
+        _io: &I,
     ) -> CaliptraVdmResult<()> {
         use caliptra_api::mailbox::{CommandId, MailboxRespHeader};
 
         if token_data.len() < core::mem::size_of::<u32>() {
             return Err(CaliptraCompletionCode::InvalidPayloadSize);
         }
-        let mut req = scratch
-            .alloc_bytes(io, token_data.len())
-            .map_err(|_| CaliptraCompletionCode::InsufficientResources)?;
-        req.copy_from_slice(token_data);
         let mut resp_buf = [0u8; core::mem::size_of::<MailboxRespHeader>()];
-        execute_mailbox_cmd(
-            &Mailbox::new(),
-            CommandId::PRODUCTION_AUTH_DEBUG_UNLOCK_TOKEN.0,
-            &mut req,
-            &mut resp_buf,
-        )
-        .await
-        .map_err(map_caliptra_api_error)?;
+        Mailbox::<DefaultSyscalls>::new()
+            .execute(
+                CommandId::PRODUCTION_AUTH_DEBUG_UNLOCK_TOKEN.0,
+                token_data,
+                &mut resp_buf,
+            )
+            .await
+            .map_err(map_mailbox_error)?;
         Ok(())
     }
 
@@ -412,6 +410,15 @@ fn map_idev_csr_error(e: CaliptraApiError) -> CaliptraCompletionCode {
         | CaliptraApiError::Mailbox(_)
         | CaliptraApiError::Syscall(_) => CaliptraCompletionCode::OperationFailed,
         _ => CaliptraCompletionCode::GeneralError,
+    }
+}
+
+fn map_mailbox_error(e: MailboxError) -> CaliptraCompletionCode {
+    match e {
+        MailboxError::ErrorCode(ErrorCode::Busy) => CaliptraCompletionCode::CaliptraMailboxBusy,
+        MailboxError::ErrorCode(_) | MailboxError::MailboxError(_) => {
+            CaliptraCompletionCode::OperationFailed
+        }
     }
 }
 

@@ -6,7 +6,7 @@ use mcu_spdm_lite_codec::{
     CapabilitiesBody, ChunkSendAckBody, ChunkSendReqBody, ReqRespCode, SpdmMsgHdrPdu, SpdmVersion,
     WireWriter, CHUNK_ACK_ATTR_EARLY_ERROR, CHUNK_ATTR_LAST_CHUNK,
 };
-use mcu_spdm_lite_traits::{PalBytes, SpdmPal, SpdmPalIo, SpdmPalIoTransport};
+use mcu_spdm_lite_traits::{PalBytes, SpdmPal, SpdmPalIo, SpdmPalIoTransport, SpdmVdmBackend};
 use zerocopy::{little_endian::U16, FromBytes};
 
 use crate::build::alloc_padded;
@@ -15,6 +15,7 @@ use crate::error::{
     SPDM_VERSION_MISMATCH,
 };
 use crate::stack::{ConnectionState, Phase};
+use crate::vendor_defined;
 
 struct ChunkInfo {
     handle: u8,
@@ -22,35 +23,33 @@ struct ChunkInfo {
     complete: bool,
 }
 
-pub(crate) async fn handle_chunk_send<'a, Pal: SpdmPal>(
+pub(crate) async fn handle_chunk_send<'a, Pal, Vdm>(
     state: &mut ConnectionState<Pal::State>,
     pal: &'a Pal,
     io: &<Pal as SpdmPalIoTransport>::Io<'_>,
-) -> SpdmResult<PalBytes<'a, Pal>> {
+    vdm_backend: &Vdm,
+) -> SpdmResult<PalBytes<'a, Pal>>
+where
+    Pal: SpdmPal,
+    Vdm: SpdmVdmBackend,
+{
     let result = process_chunk_send(state, pal, io);
     match result {
-        Ok(info) => {
-            let mut response_to_large_request = [0u8; 4];
-            let response = if info.complete {
-                let err = build_response_to_large_request(state, pal);
-                encode_error_pdu(state.version, err, &mut response_to_large_request);
-                state.chunk.reset();
-                // Reassembly consumed: release the pinned buffer (free + zero).
-                pal.large_end();
-                &response_to_large_request[..]
-            } else {
-                &[]
-            };
-            build_chunk_send_ack(
-                pal,
-                io,
-                state.version,
-                false,
-                info.handle,
-                info.chunk_seq_num,
-                response,
-            )
+        Ok(info) if info.complete => {
+            let rsp = build_completed_chunk_send_ack(state, pal, io, info, vdm_backend).await;
+            // Reassembly consumed: release the pinned buffer (free + zero).
+            pal.large_end();
+            rsp
         }
+        Ok(info) => build_chunk_send_ack(
+            pal,
+            io,
+            state.version,
+            false,
+            info.handle,
+            info.chunk_seq_num,
+            &[],
+        ),
         Err(ChunkProcessError::Spdm(e)) => Err(e),
         Err(ChunkProcessError::Early {
             handle,
@@ -92,6 +91,54 @@ fn build_chunk_send_ack<'a, Pal: SpdmPal>(
     })?;
     w.write_bytes(response_to_large_request)?;
     Ok(rsp)
+}
+
+/// Maximum bytes we are willing to carry as `ResponseToLargeRequest` inside a
+/// CHUNK_SEND_ACK. Large requests primarily cover commands such as debug unlock
+/// token programming, whose response is only a small VDM completion. Keeping
+/// this bounded avoids reserving another transport-sized scratch buffer while
+/// the reassembled request is also live.
+const LARGE_REQUEST_RESPONSE_BUF_SIZE: usize = 512;
+
+async fn build_completed_chunk_send_ack<'a, Pal, Vdm>(
+    state: &mut ConnectionState<Pal::State>,
+    pal: &'a Pal,
+    io: &<Pal as SpdmPalIoTransport>::Io<'_>,
+    info: ChunkInfo,
+    vdm_backend: &Vdm,
+) -> SpdmResult<PalBytes<'a, Pal>>
+where
+    Pal: SpdmPal,
+    Vdm: SpdmVdmBackend,
+{
+    let mut response_to_large_request = [0u8; LARGE_REQUEST_RESPONSE_BUF_SIZE];
+    let response_len = match build_response_to_large_request(
+        state,
+        pal,
+        io,
+        vdm_backend,
+        &mut response_to_large_request,
+    )
+    .await
+    {
+        Ok(len) => len,
+        Err(err) => {
+            let mut error = [0u8; 4];
+            encode_error_pdu(state.version, err, &mut error);
+            response_to_large_request[..error.len()].copy_from_slice(&error);
+            error.len()
+        }
+    };
+    state.chunk.reset();
+    build_chunk_send_ack(
+        pal,
+        io,
+        state.version,
+        false,
+        info.handle,
+        info.chunk_seq_num,
+        &response_to_large_request[..response_len],
+    )
 }
 
 enum ChunkProcessError {
@@ -264,29 +311,46 @@ fn process_next_chunk<Pal: SpdmPal>(
     Ok(())
 }
 
-fn build_response_to_large_request<Pal: SpdmPal>(
+async fn build_response_to_large_request<Pal, Vdm>(
     state: &ConnectionState<Pal::State>,
     pal: &Pal,
-) -> SpdmError {
-    if (state.chunk.large_msg_size as usize) < SpdmMsgHdrPdu::SIZE {
-        return SPDM_INVALID_REQUEST;
+    io: &<Pal as SpdmPalIoTransport>::Io<'_>,
+    vdm_backend: &Vdm,
+    out: &mut [u8],
+) -> SpdmResult<usize>
+where
+    Pal: SpdmPal,
+    Vdm: SpdmVdmBackend,
+{
+    let large_req_len = state.chunk.large_msg_size as usize;
+    if large_req_len < SpdmMsgHdrPdu::SIZE {
+        return Err(SPDM_INVALID_REQUEST);
     }
-    let mut hdr_buf = [0u8; SpdmMsgHdrPdu::SIZE];
-    if pal.large_read(0, &mut hdr_buf).is_err() {
-        return SPDM_INVALID_REQUEST;
-    };
-    let Ok((hdr, _)) = SpdmMsgHdrPdu::ref_from_prefix(&hdr_buf) else {
-        return SPDM_INVALID_REQUEST;
-    };
+    let mut large_req = pal.alloc_bytes(io, large_req_len)?;
+    pal.large_read(0, &mut large_req)
+        .map_err(|_| SPDM_INVALID_REQUEST)?;
+    let (hdr, _) = SpdmMsgHdrPdu::ref_from_prefix(&large_req).map_err(|_| SPDM_INVALID_REQUEST)?;
     if hdr.version != state.version.to_u8()
         || hdr.code == ReqRespCode::CHUNK_SEND
         || hdr.code == ReqRespCode::CHUNK_GET
     {
-        return SPDM_INVALID_REQUEST;
+        return Err(SPDM_INVALID_REQUEST);
     }
-    // TODO: Dispatch supported chunked large requests from `large_req` here.
-    // SPDM-lite currently only uses chunking for large responses.
-    SPDM_UNSUPPORTED_REQUEST
+    match hdr.code {
+        ReqRespCode::VENDOR_DEFINED_REQUEST => {
+            vendor_defined::handle_large_vendor_defined_request(
+                vdm_backend,
+                state,
+                pal,
+                io,
+                &large_req,
+                false,
+                out,
+            )
+            .await
+        }
+        _ => Err(SPDM_UNSUPPORTED_REQUEST),
+    }
 }
 
 fn encode_error_pdu(version: SpdmVersion, err: SpdmError, out: &mut [u8; 4]) {
