@@ -79,6 +79,7 @@ pub async fn image_loading_task() {
         feature = "test-pldm-discovery",
         feature = "test-pldm-fw-update",
         feature = "test-pldm-fw-update-e2e",
+        feature = "test-streaming-boot-flash-write-back",
     ))]
     {
         // Release SRAM lock, in case previous session hasn't released it
@@ -94,14 +95,16 @@ pub async fn image_loading_task() {
         mbox_sram.release_lock().unwrap();
         #[cfg(not(any(
             feature = "test-firmware-update-streaming",
-            feature = "test-firmware-update-flash"
+            feature = "test-firmware-update-flash",
+            feature = "test-streaming-boot-flash-write-back",
         )))]
         System::exit(0);
     }
     // After image loading, proceed to firmware update if enabled
     #[cfg(any(
         feature = "test-firmware-update-streaming",
-        feature = "test-firmware-update-flash"
+        feature = "test-firmware-update-flash",
+        feature = "test-streaming-boot-flash-write-back",
     ))]
     {
         if mbox_sram.acquire_lock().is_err() {
@@ -120,8 +123,11 @@ pub async fn image_loading_task() {
 #[allow(unused_variables)]
 async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), ErrorCode> {
     let mut console_writer = Console::<DefaultSyscalls>::writer();
-    writeln!(console_writer, "IMAGE_LOADER_APP: Hello async world!").unwrap();
-    #[cfg(feature = "test-pldm-streaming-boot")]
+    crate::console_writeln!(console_writer, "IMAGE_LOADER_APP: Hello async world!");
+    #[cfg(any(
+        feature = "test-pldm-streaming-boot",
+        feature = "test-streaming-boot-flash-write-back",
+    ))]
     {
         let fw_params = PldmFirmwareDeviceParams {
             descriptors: &config::streaming_boot_consts::DESCRIPTOR.get()[..],
@@ -130,13 +136,15 @@ async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), Err
         let pldm_image_loader =
             PldmImageLoader::new(&fw_params, EXECUTOR.get().spawner(), dma_mapping);
         pldm_image_loader
-            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID1)
+            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID1, true)
             .await?;
         pldm_image_loader
-            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID2)
+            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID2, false)
             .await?;
         // Close the PLDM session
         pldm_image_loader.finalize()?;
+        // Wait for the PLDM service to fully complete the protocol before proceeding
+        pldm_image_loader.wait_for_service_stopped().await;
         // Activate the SoC Images (set FW_EXEC_CTRL bit of the corresponding SoC)
         activate_soc_images(&[
             config::streaming_boot_consts::IMAGE_ID1,
@@ -192,10 +200,10 @@ async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), Err
         }
 
         flash_image_loader
-            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID1)
+            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID1, true)
             .await?;
         flash_image_loader
-            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID2)
+            .load_and_authorize(config::streaming_boot_consts::IMAGE_ID2, false)
             .await?;
         boot_config
             .set_partition_status(load_partition.0, PartitionStatus::BootSuccessful)
@@ -220,18 +228,16 @@ async fn image_loading<D: DMAMapping>(dma_mapping: &'static D) -> Result<(), Err
     {
         let fdops = pldm_fdops_mock::FdOpsObject::new();
         let mut pldm_service = PldmService::init(&fdops, EXECUTOR.get().spawner());
-        writeln!(
+        crate::console_writeln!(
             console_writer,
             "PLDM_APP: Starting PLDM service for testing..."
-        )
-        .unwrap();
+        );
         if let Err(e) = pldm_service.start().await {
-            writeln!(
+            crate::console_writeln!(
                 console_writer,
                 "PLDM_APP: Error starting PLDM service: {:?}",
                 e
-            )
-            .unwrap();
+            );
         }
         pldm_fdops_mock::FdOpsObject::wait_for_pldm_done().await;
     }

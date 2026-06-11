@@ -82,6 +82,7 @@ const FEATURES_REQUIRING_SOC_IMAGES: &[&str] = &[
     "test-pldm-streaming-boot",
     "test-firmware-update-flash",
     "test-firmware-update-streaming",
+    "test-streaming-boot-flash-write-back",
     "test-mctp-spdm-attestation",
     "test-mctp-spdm-attestation-pcr-quote",
 ];
@@ -540,6 +541,7 @@ pub struct AllBuildArgs<'a> {
     pub pldm_manifest: Option<&'a str>,
     pub vendor: Option<&'a str>,
     pub model: Option<&'a str>,
+    pub profile: Option<&'a str>,
 }
 
 /// Build Caliptra ROM and firmware bundle, MCU ROM and runtime, and SoC manifest, and package them all together in a ZIP file.
@@ -555,6 +557,7 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
         pldm_manifest,
         vendor,
         model,
+        profile,
     } = args;
 
     // TODO: use temp files
@@ -610,11 +613,18 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
             .collect();
     test_roms.extend(cptra_test_roms?);
 
+    // Auto-enable the `release` cargo feature when building with the `release`
+    // profile, mirroring the same logic in `xtask runtime-build`.  This strips
+    // kernel `debug!()`, romtime `println!()`, Console, DebugWriter, etc.
+    let is_release = matches!(profile, Some("release"));
+
     let runtime_features = match runtime_features {
         Some(r) if !r.is_empty() => r.split(",").collect::<Vec<&str>>(),
         _ => {
             if separate_runtimes {
-                if platform == "fpga" {
+                if is_release {
+                    crate::features::RELEASE_RUNTIME_TEST_FEATURES.to_vec()
+                } else if platform == "fpga" {
                     crate::features::FPGA_RUNTIME_TEST_FEATURES.to_vec()
                 } else {
                     crate::features::EMULATOR_RUNTIME_TEST_FEATURES.to_vec()
@@ -633,6 +643,10 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
     } else {
         // build one runtime with all feature flags
         base_runtime_features = runtime_features;
+    }
+
+    if is_release && !base_runtime_features.contains(&"release") {
+        base_runtime_features.push("release");
     }
 
     // Determine effective SoC images for base runtime features.
@@ -684,6 +698,7 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
         output_name: Some(base_runtime_path.to_string()),
         example_app: false,
         platform: Some(platform),
+        profile,
         ..Default::default()
     })?;
 
@@ -824,11 +839,17 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
             let feature_runtime_path = feature_runtime_file.path().to_str().unwrap().to_string();
             let include_example_app = FEATURES_WITH_EXAMPLE_APP.contains(feature);
 
+            let feature_str = if is_release && !feature.contains("release") {
+                format!("{},release", feature)
+            } else {
+                feature.to_string()
+            };
             crate::runtime_build_with_apps(&CaliptraBuildArgs {
-                features: Some(feature),
+                features: Some(&feature_str),
                 output_name: Some(feature_runtime_path),
                 example_app: include_example_app,
                 platform: Some(platform),
+                profile,
                 target_dir,
                 ..Default::default()
             })?;
@@ -891,7 +912,8 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
             // For firmware update tests, create a separate "update" flash image WITHOUT partition table
             // This is used for the PLDM update package (the downloaded firmware)
             let is_firmware_update_feature = *feature == "test-firmware-update-flash"
-                || *feature == "test-firmware-update-streaming";
+                || *feature == "test-firmware-update-streaming"
+                || *feature == "test-streaming-boot-flash-write-back";
             let feature_update_flash_image = if is_firmware_update_feature {
                 Some(create_flash_image(
                     Some(caliptra_fw.clone()),
@@ -944,7 +966,12 @@ pub fn all_build(args: AllBuildArgs) -> Result<()> {
         .collect();
     let test_runtimes = test_runtimes?;
 
-    let default_path = crate::target_dir().join("all-fw.zip");
+    let default_name = if is_release {
+        "all-fw-release.zip"
+    } else {
+        "all-fw.zip"
+    };
+    let default_path = crate::target_dir().join(default_name);
     let path = output.map(Path::new).unwrap_or(&default_path);
     println!("Creating ZIP file: {}", path.display());
     let file = std::fs::File::create(path)?;

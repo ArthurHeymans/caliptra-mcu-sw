@@ -11,10 +11,36 @@ use caliptra_mcu_libtockasync::TockExecutor;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 #[allow(unused)]
 use embassy_sync::{lazy_lock::LazyLock, signal::Signal};
+
+/// Console `writeln!` that compiles to a no-op in `release` cargo-feature
+/// builds (i.e. the shipping `--profile release` build that auto-enables
+/// `--features release`).  In `devel` builds the macro is a real `writeln!`,
+/// preserving every diagnostic and informational message.
+///
+/// The `release` arm expands to a never-called closure so its arguments are
+/// type-checked (no unused-var warnings, formatting traits satisfied) but the
+/// closure body is unreachable.  LTO + lld `--gc-sections` strip the format
+/// strings, any `Debug` impls reached via `{:?}`, and the entire console
+/// syscall path from the binary.
+#[macro_export]
+macro_rules! console_writeln {
+    ($($arg:tt)*) => {{
+        #[cfg(not(feature = "release"))]
+        {
+            let _ = ::core::writeln!($($arg)*);
+        }
+        #[cfg(feature = "release")]
+        {
+            let _ = || -> ::core::fmt::Result { ::core::writeln!($($arg)*) };
+        }
+    }};
+}
+
 mod caliptra_cmd_handler;
 #[cfg(any(
     feature = "test-firmware-update-streaming",
-    feature = "test-firmware-update-flash"
+    feature = "test-firmware-update-flash",
+    feature = "test-streaming-boot-flash-write-back",
 ))]
 mod firmware_update;
 mod image_loader;
@@ -82,7 +108,8 @@ pub(crate) async fn async_main() {
     // for now, disable the SPDM task if either FW update test is enabled
     #[cfg(not(any(
         feature = "test-firmware-update-streaming",
-        feature = "test-firmware-update-flash"
+        feature = "test-firmware-update-flash",
+        feature = "test-streaming-boot-flash-write-back",
     )))]
     EXECUTOR
         .get()

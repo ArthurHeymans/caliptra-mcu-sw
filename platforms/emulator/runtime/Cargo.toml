@@ -41,7 +41,12 @@ rv32i.workspace = true
 
 [features]
 default = []
-debug = []
+# Production / minimal-size build.  Strips:
+#   - kernel `debug!()` macro          (via kernel/no_debug_panics)
+#   - romtime `print!`/`println!`      (via caliptra-mcu-romtime/no-print)
+#   - DebugWriter, Console, LowLevelDebug, ProcessConsole, ProcessPrinter
+# Default (off) = full debug / interactive experience.
+release = ["kernel/no_debug_panics", "caliptra-mcu-romtime/no-print"]
 hw-2-1 = []
 test-caliptra-certs = []
 test-caliptra-crypto = []
@@ -67,8 +72,8 @@ test-flash-usermode = []
 test-firmware-update-flash = []
 test-firmware-update-streaming = []
 test-fpga-flash-ctrl = []
-test-log-flash-linear = []
 test-log-flash-circular = []
+test-log-flash-linear = []
 test-log-flash-usermode = []
 test-mbox-sram = []
 test-external-otp = []
@@ -91,9 +96,11 @@ test-pldm-discovery = []
 test-pldm-fw-update = []
 test-pldm-fw-update-e2e = []
 test-pldm-streaming-boot = []
+test-streaming-boot-flash-write-back = []
 test-mctp-spdm-responder-conformance = []
 test-mctp-spdm-attestation = []
 test-mctp-spdm-attestation-pcr-quote = []
+test-mctp-spdm-set-certificate = []
 test-doe-spdm-responder-conformance = []
 test-doe-spdm-tdisp-ide-validator = []
 test-warm-reset = []

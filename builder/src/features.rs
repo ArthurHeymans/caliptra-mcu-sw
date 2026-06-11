@@ -6,6 +6,7 @@ pub const EMULATOR_RUNTIME_TEST_FEATURES: &[&str] = &[
     "test-i3c-constant-writes",
     "test-mctp-capsule-loopback",
     "test-firmware-update-streaming",
+    "test-streaming-boot-flash-write-back",
     "test-firmware-update-flash",
     "test-flash-based-boot",
     "test-pldm-streaming-boot",
@@ -25,8 +26,8 @@ pub const EMULATOR_RUNTIME_TEST_FEATURES: &[&str] = &[
     "test-flash-storage-read-write",
     "test-flash-storage-erase",
     "test-flash-usermode",
-    "test-log-flash-linear",
     "test-log-flash-circular",
+    "test-log-flash-linear",
     "test-log-flash-usermode",
     "test-mctp-ctrl-cmds",
     "test-mctp-user-loopback",
@@ -63,6 +64,11 @@ pub const FPGA_RUNTIME_TEST_FEATURES: &[&str] = &[
     "test-mctp-spdm-attestation-pcr-quote",
     "test-mctp-spdm-responder-conformance",
 ];
+
+/// Release-profile runtime test features (emulator).
+/// These are the subset of tests we run against the release (512 KB SRAM,
+/// no debug logs) firmware to verify it boots and works correctly.
+pub const RELEASE_RUNTIME_TEST_FEATURES: &[&str] = &["test-flash-based-boot"];
 
 /// ROM-only test features that need a prebuilt ROM but no custom runtime.
 /// These features exist in both the emulator and FPGA ROM crates; the

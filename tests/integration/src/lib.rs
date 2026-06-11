@@ -17,6 +17,7 @@ mod test_firmware_update;
 mod test_fpga_flash_ctrl;
 mod test_i3c_constant_writes;
 mod test_i3c_simple;
+mod test_log_flash_usermode;
 mod test_mctp_capsule_loopback;
 mod test_mctp_spdm_attestation;
 mod test_mctp_spdm_attestation_pcr_quote;
@@ -24,6 +25,7 @@ mod test_mctp_spdm_responder_conformance;
 mod test_mctp_vdm_cmds;
 mod test_mctp_vdm_validator;
 mod test_mcu_mbox;
+mod test_ocp_dev_identity_provision_tool;
 mod test_pldm_fw_update;
 mod test_raw_lifecycle_boot;
 mod test_soc_boot;
@@ -961,8 +963,9 @@ mod test {
     run_test!(test_flash_storage_read_write);
     run_test!(test_flash_storage_erase);
     run_test!(test_flash_usermode, example_app);
-    run_test!(test_log_flash_linear);
     run_test!(test_log_flash_circular);
+    run_test!(test_log_flash_linear);
+    #[cfg(not(feature = "fpga_realtime"))]
     run_test!(test_log_flash_usermode, example_app);
     run_test!(test_mctp_ctrl_cmds);
     run_test!(test_mctp_user_loopback, example_app);

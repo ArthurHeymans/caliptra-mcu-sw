@@ -5,11 +5,11 @@ use caliptra_mcu_config::flash::FlashPartition;
 use core::mem::offset_of;
 use zerocopy::{FromBytes, Immutable, IntoBytes};
 
-pub const FLASH_PARTITIONS_COUNT: usize = 4; // Number of flash partitions
+pub const FLASH_PARTITIONS_COUNT: usize = 5; // Number of flash partitions
 
 // Allocate driver numbers for flash partitions
 pub const DRIVER_NUM_START: usize = 0x7000_0006; // Base driver number for flash partitions
-pub const DRIVER_NUM_END: usize = 0x7000_0009; // End driver number for flash partitions
+pub const DRIVER_NUM_END: usize = 0x7000_000A; // End driver number for flash partitions
 
 pub const BLOCK_SIZE: usize = 64 * 1024; // Block size for flash partitions
 
@@ -41,6 +41,13 @@ pub const STAGING_PARTITION: FlashPartition = FlashPartition {
     driver_num: 0x7000_0009,
 };
 
+pub const CERT_STORE_PARTITION: FlashPartition = FlashPartition {
+    name: "cert_store",
+    offset: STAGING_PARTITION.offset + STAGING_PARTITION.size,
+    size: (BLOCK_SIZE * 0x8),
+    driver_num: 0x7000_000A,
+};
+
 #[macro_export]
 macro_rules! flash_partition_list_primary {
     ($macro:ident) => {{
@@ -54,6 +61,7 @@ macro_rules! flash_partition_list_secondary {
     ($macro:ident) => {{
         $macro!(2, image_b, IMAGE_B_PARTITION);
         $macro!(3, staging, STAGING_PARTITION);
+        $macro!(4, cert_store, CERT_STORE_PARTITION);
     }};
 }
 
@@ -183,27 +191,9 @@ impl StandAloneChecksumCalculator {
 }
 impl ChecksumCalculator for StandAloneChecksumCalculator {}
 
-// Logging flash configuration for emulator platform
-#[derive(Debug, Clone, Copy)]
-pub struct LoggingFlashConfig {
-    pub logging_flash_size: u32,
-    pub logging_flash_offset: u32,
-    pub base_addr: u32, // Base address of the logging flash.
-    pub page_size: u32, // Flash page size in bytes.
-}
-
-impl LoggingFlashConfig {
-    // 128KB at the end of the 64MB primary flash is reserved for logging.
-    // Offset is calculated as: caliptra_mcu_emulator_consts::DIRECT_READ_FLASH_ORG + caliptra_mcu_emulator_consts::DIRECT_READ_FLASH_SIZE - 128 * 1024.
-    // This region must not overlap with any other flash partitions.
-    pub const fn default() -> Self {
-        Self {
-            logging_flash_offset: 0x3BFE_0000,
-            logging_flash_size: 128 * 1024,
-            base_addr: 0x3800_0000,
-            page_size: 256,
-        }
-    }
-}
-
-pub const LOGGING_FLASH_CONFIG: LoggingFlashConfig = LoggingFlashConfig::default();
+pub const LOGGING_PARTITION: FlashPartition = FlashPartition {
+    name: "logging",
+    offset: 0x03FF_8000,
+    size: 32 * 1024,
+    driver_num: 0x9001_0000,
+};

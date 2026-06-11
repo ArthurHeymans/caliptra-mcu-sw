@@ -50,10 +50,17 @@ portable-atomic = { workspace = true, features = ["critical-section"] }
 
 [features]
 default = []
-debug = []
 hw-2-1 = []
 doe = []
 pcr-quote-measurements = []
+# Production / minimal-size build for user-app.  Activated automatically by
+# `xtask runtime-build --profile release` (via `--features release` forwarded
+# through the bundler).  Gates `console_writeln!` to a no-op so all of
+# user-app's informational and diagnostic output (including the `{:?}` Debug
+# format paths) is stripped, and forwards to `caliptra-mcu-romtime/no-print`
+# so the romtime `print!`/`println!` macros become no-ops inside user-app's
+# private dependency build of `caliptra-mcu-romtime`.
+release = ["caliptra-mcu-romtime/no-print"]
 test-caliptra-certs = []
 test-caliptra-crypto = []
 test-caliptra-mailbox = []
@@ -74,12 +81,12 @@ test-flash-ctrl-erase-page = []
 test-flash-storage-read-write = []
 test-flash-storage-erase = []
 test-flash-usermode = []
+test-log-flash-circular = []
+test-log-flash-linear = []
+test-log-flash-usermode = []
 test-firmware-update-flash = []
 test-firmware-update-streaming = []
 test-fpga-flash-ctrl = []
-test-log-flash-linear = []
-test-log-flash-circular = []
-test-log-flash-usermode = []
 test-mbox-sram = []
 test-mci = []
 test-mctp-ctrl-cmds = []
@@ -100,9 +107,11 @@ test-pldm-discovery = []
 test-pldm-fw-update = []
 test-pldm-fw-update-e2e = []
 test-pldm-streaming-boot = []
+test-streaming-boot-flash-write-back = []
 test-mctp-spdm-attestation = []
 test-mctp-spdm-attestation-pcr-quote = ["pcr-quote-measurements"]
 test-mctp-spdm-responder-conformance = []
+test-mctp-spdm-set-certificate = []
 test-doe-spdm-responder-conformance = ["doe"]
 test-doe-spdm-tdisp-ide-validator = ["doe"]
 test-mcu-mbox-fips-periodic = ["caliptra-mcu-mbox-lib/periodic-fips-self-test"]

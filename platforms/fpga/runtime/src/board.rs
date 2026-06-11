@@ -6,6 +6,7 @@ use arrayvec::ArrayVec;
 use caliptra_mcu_capsules_runtime::flash_partition::FlashPartition;
 use caliptra_mcu_capsules_runtime::mctp::base_protocol::MessageType;
 use caliptra_mcu_capsules_runtime::mcu_mbox::McuMboxDriver;
+use caliptra_mcu_components::external_otp_component_static;
 use caliptra_mcu_components::mbox_sram_component_static;
 use caliptra_mcu_components::mctp_driver_component_static;
 use caliptra_mcu_components::mctp_mux_component_static;
@@ -129,10 +130,12 @@ struct VeeR {
         'static,
         VirtualMuxAlarm<'static, InternalTimers<'static>>,
     >,
-    console: &'static capsules_core::console::Console<'static>,
-    lldb: &'static capsules_core::low_level_debug::LowLevelDebug<
-        'static,
-        capsules_core::virtualizers::virtual_uart::UartDevice<'static>,
+    console: Option<&'static capsules_core::console::Console<'static>>,
+    lldb: Option<
+        &'static capsules_core::low_level_debug::LowLevelDebug<
+            'static,
+            capsules_core::virtualizers::virtual_uart::UartDevice<'static>,
+        >,
     >,
     scheduler: &'static CooperativeSched<'static>,
     scheduler_timer:
@@ -158,8 +161,11 @@ struct VeeR {
         VirtualMuxAlarm<'static, InternalTimers<'static>>,
     >,
     otp: &'static caliptra_mcu_capsules_runtime::otp::Otp,
+    external_otp: &'static caliptra_mcu_capsules_runtime::external_otp::ExternalOtpCapsule<'static>,
     system: &'static caliptra_mcu_capsules_runtime::system::System<'static, FpgaExiter>,
     dma: &'static caliptra_mcu_capsules_emulator::dma::Dma<'static>,
+    logging_flash:
+        &'static caliptra_mcu_capsules_runtime::logging::driver::LoggingFlashDriver<'static>,
 }
 
 /// Mapping of integer syscalls to objects that implement syscalls.
@@ -170,8 +176,12 @@ impl SyscallDriverLookup for VeeR {
     {
         match driver_num {
             capsules_core::alarm::DRIVER_NUM => f(Some(self.alarm)),
-            capsules_core::console::DRIVER_NUM => f(Some(self.console)),
-            capsules_core::low_level_debug::DRIVER_NUM => f(Some(self.lldb)),
+            capsules_core::console::DRIVER_NUM => f(self
+                .console
+                .map(|c| c as &dyn kernel::syscall::SyscallDriver)),
+            capsules_core::low_level_debug::DRIVER_NUM => {
+                f(self.lldb.map(|l| l as &dyn kernel::syscall::SyscallDriver))
+            }
             caliptra_mcu_capsules_runtime::mctp::driver::MCTP_SPDM_DRIVER_NUM => {
                 f(Some(self.mctp_spdm))
             }
@@ -209,8 +219,14 @@ impl SyscallDriverLookup for VeeR {
                 f(Some(self.mcu_mbox1_staging_sram))
             }
             caliptra_mcu_capsules_runtime::otp::DRIVER_NUM => f(Some(self.otp)),
+            caliptra_mcu_capsules_runtime::external_otp::EXTERNAL_OTP_DRIVER_NUM => {
+                f(Some(self.external_otp))
+            }
             caliptra_mcu_capsules_runtime::system::DRIVER_NUM => f(Some(self.system)),
             caliptra_mcu_capsules_emulator::dma::DMA_CTRL_DRIVER_NUM => f(Some(self.dma)),
+            caliptra_mcu_capsules_runtime::logging::driver::LOGGING_FLASH_DRIVER_NUM => {
+                f(Some(self.logging_flash))
+            }
             _ => f(None),
         }
     }
@@ -473,6 +489,7 @@ pub unsafe fn main() {
         board_kernel,
         caliptra_mcu_capsules_runtime::mailbox::DRIVER_NUM,
         mux_alarm,
+        Some(100_000),
     )
     .finalize(caliptra_mcu_components::mailbox_component_static!(
         InternalTimers<'static>,
@@ -507,35 +524,59 @@ pub unsafe fn main() {
     caliptra_mcu_romtime::println!("[mcu-runtime] Chip initialized");
 
     // Create a shared UART channel for the console and for kernel debug.
+    // The DebugWriter must always be initialized because the kernel's `debug!()`
+    // macro and panic/fault handlers unconditionally call `get_debug_writer()`.
     // TODO: add a new UART for the FPGA
     let uart_mux = components::console::UartMuxComponent::new(&fpga_peripherals.uart, 115200)
         .finalize(components::uart_mux_component_static!());
     caliptra_mcu_romtime::println!("[mcu-runtime] UART initialized");
 
     // Create the debugger object that handles calls to `debug!()`.
+    // Must always be present — the kernel's panic handler and fault diagnostics
+    // require it.
     components::debug_writer::DebugWriterComponent::new(uart_mux)
         .finalize(components::debug_writer_component_static!());
     caliptra_mcu_romtime::println!("[mcu-runtime] DebugWriter initialized");
 
-    let lldb = components::lldb::LowLevelDebugComponent::new(
-        board_kernel,
-        capsules_core::low_level_debug::DRIVER_NUM,
-        uart_mux,
-    )
-    .finalize(components::low_level_debug_component_static!());
-    caliptra_mcu_romtime::println!("[mcu-runtime] LowLevelDebugComponent initialized");
+    // LowLevelDebug capsule (alert-code printer used by user-app panic
+    // handlers).  Stripped in `release` builds.
+    #[cfg(not(feature = "release"))]
+    let lldb = Some({
+        let lldb = components::lldb::LowLevelDebugComponent::new(
+            board_kernel,
+            capsules_core::low_level_debug::DRIVER_NUM,
+            uart_mux,
+        )
+        .finalize(components::low_level_debug_component_static!());
+        caliptra_mcu_romtime::println!("[mcu-runtime] LowLevelDebugComponent initialized");
+        lldb
+    });
+    #[cfg(feature = "release")]
+    let lldb = None;
 
-    // Setup the console.
-    let console = components::console::ConsoleComponent::new(
-        board_kernel,
-        capsules_core::console::DRIVER_NUM,
-        uart_mux,
-    )
-    .finalize(components::console_component_static!());
-    caliptra_mcu_romtime::println!("[mcu-runtime] Console initialized");
+    // Setup the console.  Userspace `Console::<>::writer()` writes to this
+    // syscall driver.  Stripped in `release` builds; user-app `writeln!()` calls use `let _ = ...`
+    // so the syscall returning `NoDevice` does not panic.
+    #[cfg(not(feature = "release"))]
+    let console = Some({
+        let console = components::console::ConsoleComponent::new(
+            board_kernel,
+            capsules_core::console::DRIVER_NUM,
+            uart_mux,
+        )
+        .finalize(components::console_component_static!());
+        caliptra_mcu_romtime::println!("[mcu-runtime] Console initialized");
+        console
+    });
+    #[cfg(feature = "release")]
+    let console = None;
 
     // Create a process printer for panic.
-    if cfg!(feature = "debug") {
+    // Use the attribute form (not `if cfg!(...)`) so the body is excluded from
+    // compilation when the feature is off (it references items that may also
+    // be cfg'd out, e.g. `uart_mux`).
+    #[cfg(not(feature = "release"))]
+    {
         let process_printer = components::process_printer::ProcessPrinterTextComponent::new()
             .finalize(components::process_printer_text_component_static!());
         PROCESS_PRINTER = Some(process_printer);
@@ -637,6 +678,28 @@ pub unsafe fn main() {
     );
     caliptra_mcu_romtime::println!("[mcu-runtime] Flash partition component initialized");
 
+    // Flash user for the logging capsule, sharing the primary flash mux.
+    let logging_fl_user = components::flash::FlashUserComponent::new(mux_mcu_mbox_flash).finalize(
+        components::flash_user_component_static!(caliptra_mcu_flash_ctrl_fpga::EmulatedFlashCtrl),
+    );
+
+    // Logging flash capsule
+    let logging_flash = caliptra_mcu_components::logging::LoggingFlashComponent::new(
+        board_kernel,
+        caliptra_mcu_capsules_runtime::logging::driver::LOGGING_FLASH_DRIVER_NUM,
+        logging_fl_user,
+        caliptra_mcu_config_fpga::flash::LOGGING_PARTITION
+            .base_page(caliptra_mcu_flash_ctrl_fpga::PAGE_SIZE),
+        caliptra_mcu_config_fpga::flash::LOGGING_PARTITION
+            .num_pages(caliptra_mcu_flash_ctrl_fpga::PAGE_SIZE),
+        true,
+    )
+    .finalize(caliptra_mcu_components::logging_flash_component_static!(
+        virtual_flash::FlashUser<'static, caliptra_mcu_flash_ctrl_fpga::EmulatedFlashCtrl>,
+        caliptra_mcu_capsules_runtime::logging::driver::BUF_LEN
+    ));
+    caliptra_mcu_romtime::println!("[mcu-runtime] Logging flash component initialized");
+
     let total_heks = 0;
     let otp = caliptra_mcu_components::otp::OtpComponent::new(
         board_kernel,
@@ -661,6 +724,41 @@ pub unsafe fn main() {
     .finalize(kernel::static_buf!(
         caliptra_mcu_capsules_emulator::dma::Dma<'static>
     ));
+
+    // ExternalOTP: DMA-backed implementation using External SRAM storage.
+    // Integrators replace ExtSramBackedExternalOtp with their platform's actual
+    // fuse/EPROM controller driver.
+    use caliptra_mcu_external_otp_driver::hil::ExternalOtpPartitionInfo;
+    use caliptra_mcu_external_otp_emulator::ext_sram_otp::ExtSramBackedExternalOtp;
+
+    const EXTERNAL_OTP_PARTITIONS: &[ExternalOtpPartitionInfo] = &[
+        ExternalOtpPartitionInfo {
+            id: 0x01,
+            size: 547,
+        }, // IDevID ECC Cert
+        ExternalOtpPartitionInfo {
+            id: 0x02,
+            size: 4627,
+        }, // IDevID MLDSA signature
+    ];
+    const EXTERNAL_OTP_SRAM_BASE: u64 = 0xB00C_0000; // External SRAM base (AXI address)
+
+    let external_otp_driver = static_init!(
+        ExtSramBackedExternalOtp<'static>,
+        ExtSramBackedExternalOtp::new(
+            EXTERNAL_OTP_PARTITIONS,
+            &fpga_peripherals.dma,
+            EXTERNAL_OTP_SRAM_BASE,
+        )
+    );
+
+    let external_otp = caliptra_mcu_components::external_otp::ExternalOtpComponent::new(
+        external_otp_driver,
+        board_kernel,
+        caliptra_mcu_capsules_runtime::external_otp::EXTERNAL_OTP_DRIVER_NUM,
+    )
+    .finalize(external_otp_component_static!());
+    caliptra_mcu_romtime::println!("[mcu-runtime] ExternalOTP component initialized");
 
     let mcu_mbox0 = caliptra_mcu_components::mcu_mbox::McuMboxComponent::new(
         board_kernel,
@@ -719,8 +817,10 @@ pub unsafe fn main() {
             mcu_mbox0,
             mcu_mbox1_staging_sram,
             otp,
+            external_otp,
             system,
             dma,
+            logging_flash,
         }
     );
 
@@ -756,19 +856,26 @@ pub unsafe fn main() {
         BOARD = Some(board_kernel);
     }
 
-    // Run any requested test
-    let exit = if cfg!(feature = "test-exit-immediately") {
+    // Run any requested test.  Each arm is gated with `#[cfg(feature = ...)]`
+    // (attribute form, not `if cfg!(...)`) so test bodies are excluded from
+    // compilation entirely when their feature is off.
+    #[allow(unused_mut, unused_assignments)]
+    let mut exit: Option<u32> = None;
+    #[cfg(feature = "test-exit-immediately")]
+    {
         debug!("Executing test-exit-immediately");
-        Some(0)
-    } else if cfg!(feature = "test-i3c-simple") {
+        exit = Some(0);
+    }
+    #[cfg(feature = "test-i3c-simple")]
+    {
         debug!("Executing test-i3c-simple");
-        crate::tests::i3c_target_test::run_test_i3c_simple()
-    } else if cfg!(feature = "test-i3c-constant-writes") {
+        exit = crate::tests::i3c_target_test::run_test_i3c_simple();
+    }
+    #[cfg(feature = "test-i3c-constant-writes")]
+    {
         debug!("Executing test-i3c-constant-writes");
-        crate::tests::i3c_target_test::run_test_i3c_constant_writes()
-    } else {
-        None
-    };
+        exit = crate::tests::i3c_target_test::run_test_i3c_constant_writes();
+    }
 
     #[cfg(feature = "test-mctp-capsule-loopback")]
     {

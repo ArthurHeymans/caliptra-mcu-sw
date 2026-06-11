@@ -750,8 +750,6 @@ impl Emulator {
                     || test_feature == "test-flash-storage-erase"
                     || test_feature == "test-flash-usermode"
                     || test_feature == "test-mcu-rom-flash-access"
-                    || test_feature == "test-log-flash-linear"
-                    || test_feature == "test-log-flash-circular"
                     || test_feature == "test-log-flash-usermode";
 
                 let flash_file = if is_test {
@@ -1064,8 +1062,24 @@ impl Emulator {
                         update_sm_actions:
                             caliptra_mcu_pldm_ua::update_sm::DefaultActionsExitOnError {},
                         fd_tid: 0x01,
+                        rerun_count: 0,
                     },
                 );
+            } else if test_feature == "test-streaming-boot-flash-write-back" {
+                // Single daemon with two update cycles:
+                // first for streaming boot, then for firmware update write-back
+                let caliptra_mcu_pldm_fw_pkg = caliptra_mcu_pldm_fw_pkg.unwrap();
+                PldmDaemon::run(
+                    pldm_socket,
+                    caliptra_mcu_pldm_ua::daemon::Options {
+                        caliptra_mcu_pldm_fw_pkg: Some(caliptra_mcu_pldm_fw_pkg),
+                        discovery_sm_actions: caliptra_mcu_pldm_ua::discovery_sm::DefaultActions {},
+                        update_sm_actions: caliptra_mcu_pldm_ua::update_sm::DefaultActions {},
+                        fd_tid: 0x01,
+                        rerun_count: 1,
+                    },
+                )
+                .unwrap();
             } else {
                 let _ = PldmDaemon::run(
                     pldm_socket,
@@ -1074,6 +1088,7 @@ impl Emulator {
                         discovery_sm_actions: caliptra_mcu_pldm_ua::discovery_sm::DefaultActions {},
                         update_sm_actions: caliptra_mcu_pldm_ua::update_sm::DefaultActions {},
                         fd_tid: 0x01,
+                        rerun_count: 0,
                     },
                 );
             };
