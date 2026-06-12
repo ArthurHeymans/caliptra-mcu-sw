@@ -10,7 +10,8 @@
 use arrayvec::ArrayVec;
 use caliptra_mcu_common_commands::{
     CaliptraCompletionCode as CommonCompletionCode, DeviceCapabilities, DeviceId, GetLogResult,
-    MAX_FW_VERSION_LEN, MAX_UID_LEN,
+    DEBUG_UNLOCK_CHALLENGE_SIZE, DEBUG_UNLOCK_UNIQUE_DEVICE_ID_SIZE, MAX_FW_VERSION_LEN,
+    MAX_UID_LEN,
 };
 use caliptra_mcu_libapi_caliptra::certificate::{CertContext, IDEV_ECC_CSR_MAX_SIZE};
 use caliptra_mcu_libapi_caliptra::crypto::asym::AsymAlgo;
@@ -19,7 +20,9 @@ use caliptra_mcu_libapi_caliptra::crypto::import::{CmKeyUsage, Import};
 use caliptra_mcu_libapi_caliptra::crypto::rng::Rng;
 use caliptra_mcu_libapi_caliptra::error::CaliptraApiError;
 use caliptra_mcu_libapi_caliptra::mailbox_api::execute_mailbox_cmd;
-use caliptra_mcu_libsyscall_caliptra::mailbox::Mailbox;
+use caliptra_mcu_libsyscall_caliptra::mailbox::{Mailbox, MailboxError};
+use caliptra_mcu_libsyscall_caliptra::DefaultSyscalls;
+use caliptra_mcu_libtock_platform::ErrorCode;
 use constant_time_eq::constant_time_eq;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::mutex::Mutex;
@@ -161,6 +164,72 @@ impl CaliptraVdmCommands for CaliptraVdmHook {
             1 => Err(CaliptraCompletionCode::UnsupportedOperation),
             _ => Err(CaliptraCompletionCode::InvalidParameter),
         }
+    }
+
+    async fn request_debug_unlock<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        unlock_level: u8,
+        _scratch: &A,
+        _io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize> {
+        use caliptra_api::mailbox::{
+            CommandId, MailboxReqHeader, ProductionAuthDebugUnlockChallenge,
+            ProductionAuthDebugUnlockReq,
+        };
+        use zerocopy::FromBytes;
+
+        let needed = DEBUG_UNLOCK_UNIQUE_DEVICE_ID_SIZE + DEBUG_UNLOCK_CHALLENGE_SIZE;
+        if out.len() < needed {
+            return Err(CaliptraCompletionCode::InsufficientResources);
+        }
+
+        let mailbox = Mailbox::new();
+        let mut req = ProductionAuthDebugUnlockReq {
+            hdr: MailboxReqHeader::default(),
+            length: 2,
+            unlock_level,
+            reserved: [0; 3],
+        };
+        let mut resp_buf = [0u8; core::mem::size_of::<ProductionAuthDebugUnlockChallenge>()];
+
+        execute_mailbox_cmd(
+            &mailbox,
+            CommandId::PRODUCTION_AUTH_DEBUG_UNLOCK_REQ.0,
+            req.as_mut_bytes(),
+            &mut resp_buf,
+        )
+        .await
+        .map_err(map_caliptra_api_error)?;
+
+        let resp = ProductionAuthDebugUnlockChallenge::ref_from_bytes(&resp_buf)
+            .map_err(|_| CaliptraCompletionCode::GeneralError)?;
+        out[..DEBUG_UNLOCK_UNIQUE_DEVICE_ID_SIZE].copy_from_slice(&resp.unique_device_identifier);
+        out[DEBUG_UNLOCK_UNIQUE_DEVICE_ID_SIZE..needed].copy_from_slice(&resp.challenge);
+        Ok(needed)
+    }
+
+    async fn authorize_debug_unlock_token<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        token_data: &[u8],
+        _scratch: &A,
+        _io: &I,
+    ) -> CaliptraVdmResult<()> {
+        use caliptra_api::mailbox::{CommandId, MailboxRespHeader};
+
+        if token_data.len() < core::mem::size_of::<u32>() {
+            return Err(CaliptraCompletionCode::InvalidPayloadSize);
+        }
+        let mut resp_buf = [0u8; core::mem::size_of::<MailboxRespHeader>()];
+        Mailbox::<DefaultSyscalls>::new()
+            .execute(
+                CommandId::PRODUCTION_AUTH_DEBUG_UNLOCK_TOKEN.0,
+                token_data,
+                &mut resp_buf,
+            )
+            .await
+            .map_err(map_mailbox_error)?;
+        Ok(())
     }
 
     async fn export_idevid_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
@@ -345,6 +414,15 @@ fn map_idev_csr_error(e: CaliptraApiError) -> CaliptraCompletionCode {
         | CaliptraApiError::Mailbox(_)
         | CaliptraApiError::Syscall(_) => CaliptraCompletionCode::OperationFailed,
         _ => CaliptraCompletionCode::GeneralError,
+    }
+}
+
+fn map_mailbox_error(e: MailboxError) -> CaliptraCompletionCode {
+    match e {
+        MailboxError::ErrorCode(ErrorCode::Busy) => CaliptraCompletionCode::CaliptraMailboxBusy,
+        MailboxError::ErrorCode(_) | MailboxError::MailboxError(_) => {
+            CaliptraCompletionCode::OperationFailed
+        }
     }
 }
 

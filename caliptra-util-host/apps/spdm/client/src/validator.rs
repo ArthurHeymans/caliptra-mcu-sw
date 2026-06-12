@@ -401,8 +401,8 @@ pub fn run_export_idevid_csr_expect_fail(
 /// When a [`DebugUnlockSigner`] is provided, performs a full end-to-end flow:
 /// request challenge → sign token → submit token.
 ///
-/// Without a signer, sends a zeroed token (expected to be rejected) to confirm
-/// command dispatch works.
+/// Without a signer, skips the check: a production debug-unlock flow requires
+/// a signed token and is lifecycle/fuse dependent.
 pub fn run_prod_debug_unlock(
     client: &mut SpdmVdmClient,
     unlock_level: u8,
@@ -417,6 +417,10 @@ pub fn run_prod_debug_unlock(
         println!("\n=== Validating Production Debug Unlock (SPDM VDM) ===");
     }
 
+    let Some(signer) = signer else {
+        return ValidationResult::skip(test_name, "no debug-unlock signer provided");
+    };
+
     match client.prod_debug_unlock_req(unlock_level) {
         Ok(response) => {
             if verbose {
@@ -428,45 +432,41 @@ pub fn run_prod_debug_unlock(
                 println!("    Challenge: {:02X?}...", &response.challenge[..8]);
             }
 
-            if let Some(signer) = signer {
-                // Full end-to-end: sign a real token
-                if verbose {
-                    println!("  Signing token with provided signer...");
+            // Full end-to-end: sign a real token
+            if verbose {
+                println!("  Signing token with provided signer...");
+            }
+
+            let challenge = ProdDebugUnlockChallenge {
+                unique_device_identifier: response.unique_device_identifier,
+                challenge: response.challenge,
+            };
+
+            let token = match signer.sign_debug_unlock_token(&challenge, unlock_level) {
+                Ok(t) => ProdDebugUnlockTokenRequest {
+                    length: t.length,
+                    unique_device_identifier: t.unique_device_identifier,
+                    unlock_level: t.unlock_level,
+                    reserved: t.reserved,
+                    challenge: t.challenge,
+                    ecc_public_key: t.ecc_public_key,
+                    mldsa_public_key: t.mldsa_public_key,
+                    ecc_signature: t.ecc_signature,
+                    mldsa_signature: t.mldsa_signature,
+                },
+                Err(e) => {
+                    return ValidationResult::fail(
+                        test_name,
+                        format!("Failed to sign token: {}", e),
+                    );
                 }
+            };
 
-                let challenge = ProdDebugUnlockChallenge {
-                    unique_device_identifier: response.unique_device_identifier,
-                    challenge: response.challenge,
-                };
-
-                let token = match signer.sign_debug_unlock_token(&challenge, unlock_level) {
-                    Ok(t) => ProdDebugUnlockTokenRequest {
-                        length: t.length,
-                        unique_device_identifier: t.unique_device_identifier,
-                        unlock_level: t.unlock_level,
-                        reserved: t.reserved,
-                        challenge: t.challenge,
-                        ecc_public_key: t.ecc_public_key,
-                        mldsa_public_key: t.mldsa_public_key,
-                        ecc_signature: t.ecc_signature,
-                        mldsa_signature: t.mldsa_signature,
-                    },
-                    Err(e) => {
-                        return ValidationResult::fail(
-                            test_name,
-                            format!("Failed to sign token: {}", e),
-                        );
-                    }
-                };
-
-                match client.prod_debug_unlock_token(&token) {
-                    Ok(_) => ValidationResult::pass(test_name, "token accepted"),
-                    Err(e) => {
-                        ValidationResult::fail(test_name, format!("Signed token rejected: {}", e))
-                    }
+            match client.prod_debug_unlock_token(&token) {
+                Ok(_) => ValidationResult::pass(test_name, "token accepted"),
+                Err(e) => {
+                    ValidationResult::fail(test_name, format!("Signed token rejected: {}", e))
                 }
-            } else {
-                ValidationResult::fail(test_name, "no signer provided")
             }
         }
         Err(e) => {

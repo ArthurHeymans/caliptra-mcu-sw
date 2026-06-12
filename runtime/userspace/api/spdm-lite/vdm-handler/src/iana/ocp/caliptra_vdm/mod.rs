@@ -95,6 +95,23 @@ pub trait CaliptraVdmCommands {
         io: &I,
     ) -> CaliptraVdmResult<()>;
 
+    /// Requests a production debug-unlock challenge for `unlock_level` into `out`.
+    async fn request_debug_unlock<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        unlock_level: u8,
+        scratch: &A,
+        io: &I,
+        out: &mut [u8],
+    ) -> CaliptraVdmResult<usize>;
+
+    /// Authorizes a production debug-unlock token carried in `token_data`.
+    async fn authorize_debug_unlock_token<A: SpdmPalAlloc, I: SpdmPalIo>(
+        &self,
+        token_data: &[u8],
+        scratch: &A,
+        io: &I,
+    ) -> CaliptraVdmResult<()>;
+
     /// Exports an IDevID CSR for `algorithm`, writing CSR bytes into `out`.
     async fn export_idevid_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
         &self,
@@ -234,6 +251,18 @@ impl<H: CaliptraVdmCommands> SpdmVdmBackend for CaliptraVdm<'_, H> {
             Ok(CaliptraVdmCommand::ClearAttestationLog) => {
                 commands::clear_attestation_log::handle(self.cmds, cmd_req, alloc, io, payload)
                     .await
+            }
+            Ok(CaliptraVdmCommand::RequestDebugUnlock) => {
+                commands::debug_unlock::handle_request_debug_unlock(
+                    self.cmds, cmd_req, alloc, io, payload,
+                )
+                .await
+            }
+            Ok(CaliptraVdmCommand::AuthorizeDebugUnlockToken) => {
+                commands::debug_unlock::handle_authorize_debug_unlock_token(
+                    self.cmds, cmd_req, alloc, io, payload,
+                )
+                .await
             }
             Ok(CaliptraVdmCommand::ExportIdevidCsr) => {
                 commands::export_idevid_csr::handle(
@@ -456,6 +485,25 @@ mod tests {
             Err(CaliptraCompletionCode::UnsupportedOperation)
         }
 
+        async fn request_debug_unlock<A: SpdmPalAlloc, I: SpdmPalIo>(
+            &self,
+            _unlock_level: u8,
+            _scratch: &A,
+            _io: &I,
+            _out: &mut [u8],
+        ) -> CaliptraVdmResult<usize> {
+            Err(CaliptraCompletionCode::UnsupportedOperation)
+        }
+
+        async fn authorize_debug_unlock_token<A: SpdmPalAlloc, I: SpdmPalIo>(
+            &self,
+            _token_data: &[u8],
+            _scratch: &A,
+            _io: &I,
+        ) -> CaliptraVdmResult<()> {
+            Ok(())
+        }
+
         async fn export_idevid_csr<A: SpdmPalAlloc, I: SpdmPalIo>(
             &self,
             _algorithm: u32,
@@ -667,5 +715,19 @@ mod tests {
         assert_eq!(large[2], CaliptraCompletionCode::Success as u8);
         assert_eq!(u32::from_le_bytes(large[3..7].try_into().unwrap()), 12);
         assert_eq!(&large[7..19], &[0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11]);
+    }
+
+    #[test]
+    fn authorize_debug_unlock_token_accepts_large_request_payload() {
+        let cmds = TestCommands { csr_len: 0 };
+        let mut req = vec![
+            CALIPTRA_VDM_COMMAND_VERSION,
+            CaliptraVdmCommand::AuthorizeDebugUnlockToken as u8,
+        ];
+        req.extend_from_slice(&[0xA5; 1024]);
+        let (response, inline, _) = dispatch(&cmds, &req, 32, 0);
+
+        assert_inline(response, 3);
+        assert_eq!(inline[2], CaliptraCompletionCode::Success as u8);
     }
 }
