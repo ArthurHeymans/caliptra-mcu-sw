@@ -10,12 +10,13 @@
 
 use mcu_spdm_lite_codec::{
     decode_vendor_defined_req, ReqRespCode, ResponseBody, SpdmMsgHdrPdu, SpdmVersion,
-    VendorDefinedRspBody,
+    VendorDefinedRspBody, VendorDefinedRspPdu, WireWriter,
 };
 use mcu_spdm_lite_traits::{
     PalBytes, SpdmPal, SpdmPalIoTransport, SpdmVdmBackend, VdmRegistry, VdmResponse,
     VdmResponseBuffer,
 };
+use zerocopy::little_endian::U16;
 use zerocopy::{FromBytes, IntoBytes};
 
 use crate::build::build_response;
@@ -119,6 +120,76 @@ pub(crate) async fn handle_vendor_defined_request<'a, Pal: SpdmPal, V: SpdmVdmBa
             .await
         }
     }
+}
+
+/// Decodes a reassembled large VENDOR_DEFINED request and writes the complete
+/// SPDM VENDOR_DEFINED_RESPONSE into `out`.
+///
+/// This is used for `CHUNK_SEND`'s `ResponseToLargeRequest`. The persistent
+/// large-message buffer is still occupied by the reassembled request, so large
+/// VDM responses are intentionally disabled here; handlers get only the inline
+/// response area and must return [`VdmResponse::Inline`].
+pub(crate) async fn handle_large_vendor_defined_request<Pal: SpdmPal, V: SpdmVdmBackend>(
+    vdm: &V,
+    state: &ConnectionState<Pal::State>,
+    pal: &Pal,
+    io: &<Pal as SpdmPalIoTransport>::Io<'_>,
+    spdm_msg: &[u8],
+    secure_session: bool,
+    out: &mut [u8],
+) -> SpdmResult<usize> {
+    let (hdr, body) = SpdmMsgHdrPdu::ref_from_prefix(spdm_msg).map_err(|_| SPDM_INVALID_REQUEST)?;
+    let version = SpdmVersion::from_u8(hdr.version).unwrap_or(state.version);
+
+    let decoded = decode_vendor_defined_req(body).map_err(|_| SPDM_INVALID_REQUEST)?;
+    let registry = VdmRegistry {
+        standard_id: decoded.standard_id,
+        vendor_id: decoded.vendor_id,
+        secure_session,
+    };
+    if !vdm.match_id(&registry) {
+        return Err(SPDM_UNSUPPORTED_REQUEST.with_data(ReqRespCode::VENDOR_DEFINED_REQUEST.0));
+    }
+
+    let envelope_len = SpdmMsgHdrPdu::SIZE
+        + VendorDefinedRspPdu::SIZE
+        + decoded.vendor_id.len()
+        + core::mem::size_of::<U16>();
+    if envelope_len > out.len() {
+        return Err(SPDM_UNSPECIFIED);
+    }
+    let inline_cap = out.len() - envelope_len;
+    let mut empty_large = [];
+    let outcome = {
+        let rsp = VdmResponseBuffer {
+            inline: &mut out[envelope_len..envelope_len + inline_cap],
+            large: &mut empty_large,
+            alloc: pal,
+            io,
+        };
+        vdm.handle_request(decoded.payload, rsp).await?
+    };
+    let VdmResponse::Inline(payload_len) = outcome else {
+        return Err(SPDM_UNSPECIFIED);
+    };
+    if payload_len > inline_cap || payload_len > u16::MAX as usize {
+        return Err(SPDM_UNSPECIFIED);
+    }
+
+    let mut writer = WireWriter::new(&mut out[..envelope_len]);
+    writer.write(&SpdmMsgHdrPdu::new(
+        version,
+        ReqRespCode::VENDOR_DEFINED_RESPONSE,
+    ))?;
+    writer.write(&VendorDefinedRspPdu {
+        param1: 0,
+        param2: 0,
+        standard_id: U16::new(decoded.standard_id),
+        vendor_id_len: decoded.vendor_id.len() as u8,
+    })?;
+    writer.write_bytes(decoded.vendor_id)?;
+    writer.write(&U16::new(payload_len as u16))?;
+    Ok(envelope_len + payload_len)
 }
 
 /// Frames a VENDOR_DEFINED_RESPONSE that overflows a single transport frame into
