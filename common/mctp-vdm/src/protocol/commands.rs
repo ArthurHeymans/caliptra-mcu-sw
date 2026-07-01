@@ -24,7 +24,6 @@ pub enum VdmCommand {
     ExportAttestedCsr = 0x0F,
     ProgramFieldEntropy = 0x10,
     DeviceOwnershipTransfer = 0x11,
-    GetDotBackupBlob = 0x13,
 }
 
 impl TryFrom<u8> for VdmCommand {
@@ -49,7 +48,6 @@ impl TryFrom<u8> for VdmCommand {
             0x0F => Ok(VdmCommand::ExportAttestedCsr),
             0x10 => Ok(VdmCommand::ProgramFieldEntropy),
             0x11 => Ok(VdmCommand::DeviceOwnershipTransfer),
-            0x13 => Ok(VdmCommand::GetDotBackupBlob),
             _ => Err(VdmError::UnsupportedCommand),
         }
     }
@@ -71,7 +69,6 @@ pub const SUPPORTED_COMMANDS: &[VdmCommand] = &[
     VdmCommand::ClearDebugLog,
     VdmCommand::GetAttestationLog,
     VdmCommand::ClearAttestationLog,
-    VdmCommand::GetDotBackupBlob,
 ];
 
 /// Check if a command is supported in the current implementation.
@@ -126,7 +123,6 @@ mod tests {
             VdmCommand::try_from(0x11),
             Ok(VdmCommand::DeviceOwnershipTransfer)
         );
-        assert_eq!(VdmCommand::try_from(0x13), Ok(VdmCommand::GetDotBackupBlob));
         assert_eq!(
             VdmCommand::try_from(0xFF),
             Err(VdmError::UnsupportedCommand)
@@ -152,7 +148,6 @@ mod tests {
         assert_eq!(u8::from(VdmCommand::ExportAttestedCsr), 0x0F);
         assert_eq!(u8::from(VdmCommand::ProgramFieldEntropy), 0x10);
         assert_eq!(u8::from(VdmCommand::DeviceOwnershipTransfer), 0x11);
-        assert_eq!(u8::from(VdmCommand::GetDotBackupBlob), 0x13);
     }
 
     #[test]
@@ -166,6 +161,5 @@ mod tests {
         assert!(is_command_supported(VdmCommand::GetAttestationLog));
         assert!(is_command_supported(VdmCommand::ClearAttestationLog));
         assert!(!is_command_supported(VdmCommand::ExportAttestedCsr));
-        assert!(is_command_supported(VdmCommand::GetDotBackupBlob));
     }
 }

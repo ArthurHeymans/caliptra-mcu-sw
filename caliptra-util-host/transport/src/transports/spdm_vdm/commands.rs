@@ -19,7 +19,7 @@
 //! - RequestDebugUnlock (0x0A)
 //! - AuthorizeDebugUnlockToken (0x0B)
 //! - ExportAttestedCsr (0x0F)
-//! - GetDotBackupBlob (0x13)
+//! - GetDotBackupBlob via DeviceOwnershipTransfer (0x11) subcommand `MDOT`
 
 use super::protocol::{
     CaliptraVdmCommand, CaliptraVdmCompletionCode, CALIPTRA_VDM_COMMAND_VERSION,
@@ -36,6 +36,8 @@ use zerocopy::IntoBytes;
 
 /// Caliptra RT mailbox command ID for PRODUCTION_AUTH_DEBUG_UNLOCK_TOKEN.
 const CALIPTRA_RT_CMD_PROD_DEBUG_UNLOCK_TOKEN: u32 = 0x5044_5554; // "PDUT"
+/// MC_GET_DOT_BACKUP_BLOB sub-command (`MDOT`) within DeviceOwnershipTransfer (0x11).
+const GET_DOT_BACKUP_BLOB_CMD_ID: u32 = 0x4D44_4F54;
 
 // ---------------------------------------------------------------------------
 // Helper: build VDM request, send via driver, validate response header
@@ -603,7 +605,7 @@ pub fn handle_prod_debug_unlock_token(
 }
 
 // ---------------------------------------------------------------------------
-// GetDotBackupBlob (CaliptraCommandId::GetDotBackupBlob)
+// GetDotBackupBlob (DeviceOwnershipTransfer sub-command)
 // ---------------------------------------------------------------------------
 
 pub fn handle_get_dot_backup_blob(
@@ -617,10 +619,11 @@ pub fn handle_get_dot_backup_blob(
         return Err(TransportError::InvalidMessage);
     }
 
+    let sub_cmd = GET_DOT_BACKUP_BLOB_CMD_ID.to_le_bytes();
     let mut resp_buf = [0u8; MAX_VDM_RESPONSE_SIZE];
     let resp_len = send_vdm_request(
-        CaliptraVdmCommand::GetDotBackupBlob,
-        &[],
+        CaliptraVdmCommand::DeviceOwnershipTransfer,
+        &sub_cmd,
         driver,
         &mut resp_buf,
     )?;
@@ -783,10 +786,10 @@ mod tests {
     }
 
     #[test]
-    fn get_dot_backup_blob_sends_command_0x13_and_decodes_fixed_blob() {
+    fn get_dot_backup_blob_sends_dot_subcommand_and_decodes_fixed_blob() {
         let blob = [0x5Au8; dot::DOT_BLOB_SIZE];
         let mut driver = FakeDriver {
-            response: success_response(CaliptraVdmCommand::GetDotBackupBlob, &blob),
+            response: success_response(CaliptraVdmCommand::DeviceOwnershipTransfer, &blob),
             last_request: Vec::new(),
         };
         let mut response_buffer = vec![0; core::mem::size_of::<dot::GetDotBackupBlobResponse>()];
@@ -798,7 +801,11 @@ mod tests {
             driver.last_request,
             vec![
                 CALIPTRA_VDM_COMMAND_VERSION,
-                CaliptraVdmCommand::GetDotBackupBlob as u8,
+                CaliptraVdmCommand::DeviceOwnershipTransfer as u8,
+                0x54,
+                0x4F,
+                0x44,
+                0x4D,
             ]
         );
         assert_eq!(len, core::mem::size_of::<dot::GetDotBackupBlobResponse>());
@@ -809,7 +816,7 @@ mod tests {
     fn get_dot_backup_blob_rejects_partial_blob_response() {
         let blob = [0x5Au8; dot::DOT_BLOB_SIZE - 1];
         let mut driver = FakeDriver {
-            response: success_response(CaliptraVdmCommand::GetDotBackupBlob, &blob),
+            response: success_response(CaliptraVdmCommand::DeviceOwnershipTransfer, &blob),
             last_request: Vec::new(),
         };
         let mut response_buffer = vec![0; core::mem::size_of::<dot::GetDotBackupBlobResponse>()];
@@ -823,7 +830,7 @@ mod tests {
     fn get_dot_backup_blob_rejects_short_response_buffer() {
         let blob = [0x5Au8; dot::DOT_BLOB_SIZE];
         let mut driver = FakeDriver {
-            response: success_response(CaliptraVdmCommand::GetDotBackupBlob, &blob),
+            response: success_response(CaliptraVdmCommand::DeviceOwnershipTransfer, &blob),
             last_request: Vec::new(),
         };
         let mut response_buffer =
@@ -841,7 +848,7 @@ mod tests {
     fn get_dot_backup_blob_rejects_non_empty_payload() {
         let mut driver = FakeDriver {
             response: success_response(
-                CaliptraVdmCommand::GetDotBackupBlob,
+                CaliptraVdmCommand::DeviceOwnershipTransfer,
                 &[0x5A; dot::DOT_BLOB_SIZE],
             ),
             last_request: Vec::new(),

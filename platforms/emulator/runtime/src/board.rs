@@ -795,9 +795,11 @@ pub unsafe fn main() {
 
     const EMULATOR_DOT_FLASH_ADDR: *const tock_registers::registers::ReadOnly<u8> =
         0x8100_0000 as *const tock_registers::registers::ReadOnly<u8>;
-    const EMULATOR_DOT_FLASH_SIZE: usize = 4 * 1024;
-    let dot_flash_storage =
-        unsafe { core::slice::from_raw_parts(EMULATOR_DOT_FLASH_ADDR, EMULATOR_DOT_FLASH_SIZE) };
+    let dot_flash_storage = unsafe {
+        &*(EMULATOR_DOT_FLASH_ADDR
+            as *const [tock_registers::registers::ReadOnly<u8>;
+                caliptra_mcu_capsules_runtime::dot_flash::DOT_BLOB_SIZE])
+    };
     let dot_flash = static_init!(
         caliptra_mcu_capsules_runtime::dot_flash::DotFlash,
         caliptra_mcu_capsules_runtime::dot_flash::DotFlash::new(
