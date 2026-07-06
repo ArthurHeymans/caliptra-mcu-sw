@@ -16,6 +16,7 @@ use rv32i::pmp::{pmpcfg_octet, NAPOTRegionSpec, TORRegionSpec, TORUserPMP, TORUs
 
 const MPU_REGIONS: usize = 16;
 pub const AVAILABLE_ENTRIES: usize = 64;
+const MAX_KERNEL_REGIONS: usize = AVAILABLE_ENTRIES - MPU_REGIONS * 2;
 
 pub type VeeRPMP = PMPUserMPU<MPU_REGIONS, VeeRProtectionMMLEPMP>;
 
@@ -111,10 +112,9 @@ pub enum PMPRegion {
 
 /// Configuration result containing all PMP regions in a simple list
 pub struct PMPRegionList {
-    /// Fixed-size array of regions (no heap allocation)
-    /// Size 16 assumes worst case that all regions are TOR regions (using 2 PMP entries each)
-    /// User regions: MPU_REGIONS, Kernel regions: ~3-4, total fits within AVAILABLE_ENTRIES
-    pub regions: [Option<PMPRegion>; 16],
+    /// Fixed-size array of regions (no heap allocation).
+    /// Sized for the remaining PMP entries after reserving userspace TOR entries.
+    pub regions: [Option<PMPRegion>; MAX_KERNEL_REGIONS],
     /// Number of actual regions used
     pub count: usize,
 }
@@ -123,14 +123,14 @@ impl PMPRegionList {
     /// Create a new empty region list
     pub fn new() -> Self {
         Self {
-            regions: [None; 16],
+            regions: [None; MAX_KERNEL_REGIONS],
             count: 0,
         }
     }
 
     /// Add a region to the list
     pub fn add_region(&mut self, region: PMPRegion) -> Result<(), ()> {
-        if self.count >= 16 {
+        if self.count >= MAX_KERNEL_REGIONS {
             return Err(());
         }
         self.regions[self.count] = Some(region);
@@ -277,17 +277,21 @@ impl VeeRProtectionMMLEPMP {
             reset_entry(i);
         }
 
-        // Conservative approach: assume worst-case that all regions are TOR regions (2 entries each)
-        let max_kernel_entries = pmp_regions.count * 2;
+        let kernel_entries: usize = pmp_regions
+            .iter()
+            .map(|region| match region {
+                PMPRegion::ReadOnly(_) | PMPRegion::Data(_) | PMPRegion::KernelText(_) => 2,
+                PMPRegion::UserMMIO(_) | PMPRegion::MachineMMIO(_) => 1,
+            })
+            .sum();
 
         // Ensure we don't exceed available PMP entries (reserve MPU_REGIONS*2 for user MPU)
-        if max_kernel_entries > (AVAILABLE_ENTRIES - MPU_REGIONS * 2) {
+        if kernel_entries > MAX_KERNEL_REGIONS {
             return Err(()); // Too many kernel regions
         }
 
         // Calculate starting entry for kernel regions (at the end of PMP entries)
-        // We'll use conservative allocation but only consume what we actually need
-        let kernel_start_entry = AVAILABLE_ENTRIES - max_kernel_entries;
+        let kernel_start_entry = AVAILABLE_ENTRIES - kernel_entries;
 
         // Process regions from PMPRegionList in order, writing directly to PMP registers
         // This creates a 1:1 mapping from PMPRegionList to PMP hardware entries.
